@@ -124,6 +124,8 @@ class QubesExecutor(Executor):
         encoded_src_path = encode_for_vmexec(str(src))
         cmd = [
             "/usr/lib/qubes/qrexec-client-vm",
+            "--filter-escape-chars-stderr",
+            "--filter-escape-chars-stdout",
             vm,
             f"qubesbuilder.FileCopyOut+{encoded_src_path}",
             unpacker_path,
