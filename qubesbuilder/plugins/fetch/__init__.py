@@ -28,7 +28,7 @@ import subprocess
 import shlex
 from shlex import quote
 
-from qubesbuilder.common import VerificationMode
+from qubesbuilder.common import VerificationMode, PROJECT_PATH
 from qubesbuilder.component import QubesComponent
 from qubesbuilder.config import Config
 from qubesbuilder.exc import NoQubesBuilderFileError
@@ -70,6 +70,9 @@ class FetchPlugin(ComponentPlugin):
         **kwargs,
     ):
         super().__init__(component=component, config=config, manager=manager)
+
+    def get_plugins_dir(self):
+        return PROJECT_PATH / "qubesbuilder/plugins"
 
     def update_parameters(self, stage: str):
         """
@@ -126,13 +129,12 @@ class FetchPlugin(ComponentPlugin):
                 ]
 
         # Get GIT source for a given Qubes OS component
-        copy_out = [(source_dir, self.get_sources_dir())]
         get_sources_cmd = [
-            str(executor.get_plugins_dir() / "fetch/scripts/get-and-verify-source.py"),
+            str(self.get_plugins_dir() / "fetch/scripts/get-and-verify-source.py"),
             self.component.url,  # clone from
-            str(source_dir),  # clone into
-            str(executor.get_builder_dir() / "keyring"),  # git keyring dir
-            str(executor.get_plugins_dir() / "fetch/keys"),  # keys for maintainers
+            str(self.component.source_dir),  # clone into
+            str(PROJECT_PATH / "keyring"),  # git keyring dir
+            str(self.get_plugins_dir() / "fetch/keys"),  # keys for maintainers
             "--git-branch",
             self.component.branch,
             "--minimum-distinct-maintainers",
@@ -161,11 +163,10 @@ class FetchPlugin(ComponentPlugin):
                 copy_in += [(local_source_dir, executor.get_builder_dir())]
 
         if do_fetch:
-            cmd = [
-                f"cd {str(executor.get_builder_dir())}",
-                " ".join(get_sources_cmd),
-            ]
-            executor.run(cmd, copy_in, copy_out, environment=self.environment)
+            log.info(get_sources_cmd)
+            subprocess.check_call(
+                get_sources_cmd, cwd=local_source_dir, env=self.environment
+            )
 
         # Update parameters based on previously fetched sources as .qubesbuilder
         # is now available.
@@ -312,9 +313,6 @@ class FetchPlugin(ComponentPlugin):
         # source hash and version tags determination
         #
 
-        # Temporary directory
-        temp_dir = Path(tempfile.mkdtemp(dir=self.get_temp_dir()))
-
         # Source component directory inside executors
         source_dir = executor.get_builder_dir() / self.component.name
 
@@ -334,31 +332,46 @@ class FetchPlugin(ComponentPlugin):
         copy_in = [
             (self.component.source_dir, executor.get_builder_dir()),
         ]
-        copy_out = [
-            (source_dir / "hash", temp_dir),
-            (source_dir / "vtags", temp_dir),
-        ]
+        copy_out = []
         cmd = [
-            quote_list(["rm", "-f", "--", source_dir / "hash", source_dir / "vtags"]),
-            quote_list(["cd", "--", executor.get_builder_dir()]),
-            quote_list(["git", "-C", source_dir, "rev-parse", "HEAD^{}"])
-            + " >> "
-            + quote_list([source_dir / "hash"]),
             quote_list(
-                ["git", "-C", source_dir, "tag", "--points-at", "HEAD", "--list", "v*"]
+                [
+                    "rm",
+                    "-f",
+                    "--",
+                    self.component.source_dir / "hash",
+                    self.component.source_dir / "vtags",
+                ]
+            ),
+            quote_list(["cd", "--", self.component.source_dir]),
+            quote_list(["git", "-C", self.component.source_dir, "rev-parse", "HEAD^{}"])
+            + " >> "
+            + quote_list([self.component.source_dir / "hash"]),
+            quote_list(
+                [
+                    "git",
+                    "-C",
+                    self.component.source_dir,
+                    "tag",
+                    "--points-at",
+                    "HEAD",
+                    "--list",
+                    "v*",
+                ]
             )
             + " >> "
-            + quote_list([source_dir / "vtags"]),
+            + quote_list([self.component.source_dir / "vtags"]),
         ]
         log.error(cmd)
         try:
-            executor.run(cmd, copy_in, copy_out, environment=self.environment)
-        except ExecutorError as e:
+            for i in cmd:
+                subprocess.check_call(["/bin/sh", "-c", i], env=self.environment)
+        except subprocess.CalledProcessError as e:
             msg = f"{self.component}: Failed to get source hash information: {e}."
             raise FetchError(msg) from e
 
         # Read git hash and vtags
-        with open(temp_dir / "hash") as f:
+        with open(self.component.source_dir / "hash") as f:
             data = f.read().splitlines()
 
         if not re.match(r"[\da-f]{40}", data[0]):
@@ -368,7 +381,7 @@ class FetchPlugin(ComponentPlugin):
         info["git-commit-hash"] = data[0]
         info["git-version-tags"] = []
 
-        with open(temp_dir / "vtags") as f:
+        with open(self.component.source_dir / "vtags") as f:
             data = f.read().splitlines()
 
         for tag in data:
@@ -384,25 +397,33 @@ class FetchPlugin(ComponentPlugin):
             copy_in = [
                 (self.component.source_dir, executor.get_builder_dir()),
             ]
-            copy_out = [(source_dir / "modules", temp_dir)]
             cmd = [
-                quote_list(["rm", "-f", "--", source_dir / "modules"]),
-                quote_list(["cd", "--", source_dir]),
+                quote_list(["rm", "-f", "--", self.component.source_dir / "modules"]),
+                quote_list(["cd", "--", self.component.source_dir]),
             ]
             for module in modules:
                 cmd += [
-                    quote_list(["git", "-C", source_dir / module, "rev-parse", "HEAD"])
+                    quote_list(
+                        [
+                            "git",
+                            "-C",
+                            self.component.source_dir / module,
+                            "rev-parse",
+                            "HEAD",
+                        ]
+                    )
                     + " >> "
-                    + quote_list([source_dir / "modules"]),
+                    + quote_list([self.component.source_dir / "modules"]),
                 ]
             try:
-                executor.run(cmd, copy_in, copy_out, environment=self.environment)
-            except ExecutorError as e:
+                for i in cmd:
+                    subprocess.check_call(["/bin/sh", "-c", i], env=self.environment)
+            except subprocess.CalledProcessError as e:
                 msg = f"{self.component}: Failed to get source module information: {str(e)}."
                 raise FetchError(msg) from e
 
             # Read package release name
-            with open(temp_dir / "modules") as f:
+            with open(self.component.source_dir / "modules") as f:
                 data = f.read().splitlines()
             if len(data) != len(modules):
                 msg = f"{self.component}: Invalid modules data."
@@ -439,8 +460,8 @@ class FetchPlugin(ComponentPlugin):
                 cmd += [
                     quote_list(
                         [
-                            f"{executor.get_plugins_dir()}/fetch/scripts/create-archive",
-                            f"{source_dir}/{module['name']}",
+                            f"{self.get_plugins_dir()}/fetch/scripts/create-archive",
+                            f"{self.component.source_dir}/{module['name']}",
                             f"{module['archive']}",
                             f"{module['name']}/",
                         ]
@@ -448,8 +469,9 @@ class FetchPlugin(ComponentPlugin):
                 ]
 
             try:
-                executor.run(cmd, copy_in, copy_out, environment=self.environment)
-            except ExecutorError as e:
+                for i in cmd:
+                    subprocess.check_call(["/bin/sh", "-c", i], env=self.environment)
+            except subprocess.CalledProcessError as e:
                 msg = f"{self.component}: Failed to generate module archives: {str(e)}."
                 raise FetchError(msg) from e
 
@@ -458,8 +480,6 @@ class FetchPlugin(ComponentPlugin):
 
         try:
             self.save_artifacts_info(stage=stage, basename="source", info=info)
-            # Clean temp_dir
-            shutil.rmtree(temp_dir)
         except OSError as e:
             msg = f"{self.component}: Failed to clean artifacts: {str(e)}."
             raise FetchError(msg) from e
